@@ -1,117 +1,190 @@
-name: Build Kernel Lavender 4.19 Non-Dynamic + ReSukiSU + SUSFS
+name: Build Kernel lavender (4.19 + ReSukiSU + SUSFS)
 
 on:
   workflow_dispatch:
+    inputs:
+      defconfig:
+        description: "Nama defconfig (kosongkan = auto-detect *lavender*)"
+        required: false
+        default: ""
+      resukisu_ref:
+        description: "Branch/tag ReSukiSU"
+        required: true
+        default: "main"
+      susfs_branch:
+        description: "Branch SUSFS (simonpunk/susfs4ksu)"
+        required: true
+        default: "kernel-4.19"
+      use_susfs:
+        description: "Aktifkan SUSFS"
+        type: boolean
+        default: true
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+  KBUILD_BUILD_USER: BlackTrackID
+  KBUILD_BUILD_HOST: github-actions
+  DEVICE: lavender
+  ROM_TAG: crDroid-7.64-A11
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
     steps:
-      - name: Checkout Kernel Source
+      - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
-          depth: 1
+          fetch-depth: 1
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex git gnupg gperf imagemagick liblz4-tool libncurses5-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev lld clang llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi python3 patch
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev ccache cpio zip \
+            python3 git curl patch lz4 xz-utils libncurses-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      - name: Setup ReSukiSU / BakaSU
+      - name: Setup toolchain (Proton Clang)
         run: |
-          PROTO="https://"
-          HOST="raw.githubusercontent.com"
-          PATH_KSU="/Baka-SU/BakaSU/main/kernel/setup.sh"
-          curl -LSs "${PROTO}${HOST}${PATH_KSU}" | bash
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git "$HOME/clang"
+          echo "$HOME/clang/bin" >> "$GITHUB_PATH"
 
-      - name: Setup & Patch SUSFS (4.19)
+      - name: Integrasi ReSukiSU
         run: |
-          PROTO="https://"
-          HOST="gitlab.com"
-          REPO="/simonpunk/susfs4ksu.git"
-          git clone --depth=1 -b kernel-4.19 "${PROTO}${HOST}${REPO}" susfs4ksu
-          
-          # Salin file inti SUSFS ke source kernel
-          cp susfs4ksu/kernel_patches/fs/* fs/
-          cp susfs4ksu/kernel_patches/include/linux/* include/linux/
-          
-          # Terapkan patch SUSFS ke kernel 4.19
-          patch -p1 --forward -N < susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch || true
-          
-          # Cetak isi file reject (.rej) ke log jika ada hunk yang gagal
-          find . -name "*.rej" -exec echo "=== REJECT FILE: {} ===" \; -exec cat {} \;
-          
-          # Bersihkan folder sementara susfs4ksu
-          rm -rf susfs4ksu
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" \
+            | bash -s "${{ inputs.resukisu_ref }}"
+          ls -la drivers/kernelsu* || true
 
-      - name: Clone AnyKernel3
+      - name: Integrasi SUSFS
+        if: ${{ inputs.use_susfs }}
         run: |
-          PROTO="https://"
-          HOST="github.com"
-          REPO="/BlackTrackID/AnyKernel3.git"
-          git clone --depth=1 "${PROTO}${HOST}${REPO}" AnyKernel3
+          git clone --depth=1 -b "${{ inputs.susfs_branch }}" \
+            https://gitlab.com/simonpunk/susfs4ksu.git "$HOME/susfs"
+          ls "$HOME/susfs/kernel_patches" || true
 
-      - name: Create Swap Space
-        run: |
-          sudo fallocate -l 4G /swapfile2
-          sudo chmod 600 /swapfile2
-          sudo mkswap /swapfile2
-          sudo swapon /swapfile2
-          free -h
+          cp -v "$HOME/susfs/kernel_patches/fs/"*.c fs/ 2>/dev/null || true
+          cp -v "$HOME/susfs/kernel_patches/include/linux/"*.h include/linux/ 2>/dev/null || true
 
-      - name: Build Kernel
+          PATCH=$(ls "$HOME/susfs/kernel_patches/"50_add_susfs_in_kernel-4.19*.patch | head -n1)
+          echo "Apply: $PATCH"
+          patch -p1 --no-backup-if-mismatch < "$PATCH" || true
+
+          echo "=== Hasil reject (kalau ada, harus dipatch manual) ==="
+          find . -name "*.rej" -print
+
+      - name: Siapkan defconfig
         run: |
-          export ARCH=arm64
-          export SUBARCH=arm64
-          
-          # 1. Generate .config awal sambil menekan Enter otomatis untuk prompt fragment
-          yes "" | make O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip vendor/sdm660-perf_defconfig vendor/xiaomi/lavender.config
-          
-          # 2. Aktifkan ReSukiSU dan modul-modul SUSFS
-          ./scripts/config --file out/.config \
-            -e CONFIG_KSU \
-            -e CONFIG_KSU_SUSFS \
-            -e CONFIG_KSU_SUSFS_SUS_PATH \
-            -e CONFIG_KSU_SUSFS_SUS_MOUNT \
-            -e CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
-            -e CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
-            -e CONFIG_KSU_SUSFS_SUS_KSTAT \
-            -e CONFIG_KSU_SUSFS_TRY_UMOUNT \
-            -e CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
-            -e CONFIG_KSU_SUSFS_SPOOF_UNAME \
-            -e CONFIG_KSU_SUSFS_ENABLE_LOG \
-            -e CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-            -e CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-            -e CONFIG_KSU_SUSFS_OPEN_REDIRECT \
-            -d CONFIG_KSU_MANUAL_HOOK \
-            -d CONFIG_KSU_TRACEPOINT_HOOK
-          
-          # 3. Kunci semua opsi baru sambil menjawab Enter otomatis
-          yes "" | make O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip olddefconfig
-          
-          # 4. Compile Kernel
-          yes "" | make -j$(nproc) O=out \
+          DEF="${{ inputs.defconfig }}"
+          if [ -z "$DEF" ]; then
+            DEF=$(find arch/arm64/configs -iname "*lavender*defconfig" | head -n1 | sed 's|arch/arm64/configs/||')
+          fi
+          [ -z "$DEF" ] && { echo "Defconfig lavender tidak ditemukan, isi input defconfig"; exit 1; }
+          echo "DEFCONFIG=$DEF" >> "$GITHUB_ENV"
+          echo "Pakai defconfig: $DEF"
+
+          mkdir -p out
+          make O=out CC=clang "$DEF"
+
+          # Config KernelSU/ReSukiSU + SUSFS (built-in, bukan LKM)
+          cat >> out/.config <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_KPROBES=y
+          CONFIG_HAVE_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_OVERLAY_FS=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          EOF
+          sed -i 's/^[[:space:]]*//' out/.config
+
+          if [ "${{ inputs.use_susfs }}" != "true" ]; then
+            sed -i '/CONFIG_KSU_SUSFS/d' out/.config
+          fi
+          make O=out CC=clang olddefconfig
+
+      - name: Build kernel
+        run: |
+          export PATH="$HOME/clang/bin:$PATH"
+          make -j"$(nproc)" O=out \
             CC=clang \
             LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
+            AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump STRIP=llvm-strip \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            Image.gz-dtb
+            2>&1 | tee build.log
 
-      - name: Pack AnyKernel3
+          ls -la out/arch/arm64/boot/
+
+      - name: Package AnyKernel3
         run: |
-          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
-          cp out/arch/arm64/boot/dtbo.img AnyKernel3/ || true
-          cd AnyKernel3
-          zip -r9 ../SouthWest-NG-Lavender-4.19-NonDyn-ReSukiSU-SUSFS.zip * -x .git README.md
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AK3
+          rm -rf AK3/.git AK3/README.md AK3/modules AK3/patch AK3/ramdisk
 
-      - name: Upload Kernel Zip
+          BOOT=out/arch/arm64/boot
+          if [ -f "$BOOT/Image.gz-dtb" ]; then
+            cp "$BOOT/Image.gz-dtb" AK3/
+          elif [ -f "$BOOT/Image.gz" ]; then
+            cp "$BOOT/Image.gz" AK3/
+            # dtb ikut di-append jika ada
+            find "$BOOT/dts" -name "*.dtb" -exec cat {} + > AK3/dtb 2>/dev/null || true
+          else
+            echo "Image tidak ditemukan"; exit 1
+          fi
+
+          cat > AK3/anykernel.sh <<'EOF'
+          #!/system/bin/sh
+          properties() { '
+          kernel.string=BlackTrackID 4.19 | ReSukiSU + SUSFS
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=lavender
+          device.name2=lavender_in
+          device.name3=
+          device.name4=
+          device.name5=
+          supported.versions=11
+          supported.patchlevels=
+          '; }
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+          . tools/ak3-core.sh;
+          dump_boot;
+          write_boot;
+          EOF
+          sed -i 's/^          //' AK3/anykernel.sh
+
+          DATE=$(date +%Y%m%d-%H%M)
+          cd AK3
+          zip -r9 "../${DEVICE}-4.19-ReSukiSU-SUSFS-${ROM_TAG}-${DATE}.zip" . -x "*.git*"
+          cd ..
+          echo "ZIP_NAME=${DEVICE}-4.19-ReSukiSU-SUSFS-${ROM_TAG}-${DATE}" >> "$GITHUB_ENV"
+
+      - name: Upload zip
         uses: actions/upload-artifact@v4
         with:
-          name: SouthWest-NG-Lavender-4.19-NonDyn-ReSukiSU-SUSFS
-          path: SouthWest-NG-Lavender-4.19-NonDyn-ReSukiSU-SUSFS.zip
+          name: ${{ env.ZIP_NAME }}
+          path: "*.zip"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
