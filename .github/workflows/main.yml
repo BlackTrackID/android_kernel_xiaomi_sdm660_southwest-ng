@@ -15,11 +15,74 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev lld clang
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev lld clang python3
 
       - name: Setup ReSukiSU / BakaSU (v4.2.0+)
         run: |
           curl -LSs "https://githubusercontent.com" | bash
+
+      - name: Apply Manual Hooks for 4.19
+        run: |
+          python3 - << 'EOF'
+          def patch_file(path, target, replacement):
+              with open(path, 'r') as f:
+                  content = f.read()
+              if target in content and 'ksu_' not in content:
+                  content = content.replace(target, replacement, 1)
+                  with open(path, 'w') as f:
+                      f.write(content)
+                  print(f"Patched {path}")
+              else:
+                  print(f"Skipped or target not found in {path}")
+
+          # 1. fs/exec.c
+          patch_file('fs/exec.c',
+              'static int __do_execve_file(int fd, struct filename *filename,',
+              '#ifdef CONFIG_KSU_MANUAL_HOOK\nextern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\nstatic int __do_execve_file(int fd, struct filename *filename,')
+          patch_file('fs/exec.c',
+              'if (IS_ERR(filename))',
+              '#ifdef CONFIG_KSU_MANUAL_HOOK\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\telse\n\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n#endif\n\tif (IS_ERR(filename))')
+
+          # 2. fs/open.c
+          patch_file('fs/open.c',
+              'long do_faccessat(int dfd, const char __user *filename, int mode)',
+              '#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\nlong do_faccessat(int dfd, const char __user *filename, int mode)')
+          patch_file('fs/open.c',
+              'if (mode & ~S_IRWXO)',
+              '#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\tif (mode & ~S_IRWXO)')
+
+          # 3. fs/read_write.c
+          patch_file('fs/read_write.c',
+              'ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)',
+              '#ifdef CONFIG_KSU_MANUAL_HOOK\nextern bool ksu_vfs_read_hook __read_mostly;\nextern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n#endif\nssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)')
+          patch_file('fs/read_write.c',
+              'if (!(file->f_mode & FMODE_READ))',
+              '#ifdef CONFIG_KSU_MANUAL_HOOK\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n\tif (!(file->f_mode & FMODE_READ))')
+
+          # 4. fs/stat.c
+          patch_file('fs/stat.c',
+              'int vfs_statx(int dfd, const char __user *filename, int flags,',
+              '#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\nint vfs_statx(int dfd, const char __user *filename, int flags,')
+          patch_file('fs/stat.c',
+              'if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |',
+              '#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(&dfd, &filename, &flags);\n#endif\n\tif ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |')
+
+          # 5. drivers/input/input.c
+          patch_file('drivers/input/input.c',
+              'static void input_handle_event(struct input_dev *dev,',
+              '#ifdef CONFIG_KSU_MANUAL_HOOK\nextern bool ksu_input_hook __read_mostly;\nextern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n#endif\nstatic void input_handle_event(struct input_dev *dev,')
+          patch_file('drivers/input/input.c',
+              'int disposition = input_get_disposition(dev, type, code, &value);',
+              '#ifdef CONFIG_KSU_MANUAL_HOOK\n\tif (unlikely(ksu_input_hook))\n\t\tksu_handle_input_handle_event(&type, &code, &value);\n#endif\n\tint disposition = input_get_disposition(dev, type, code, &value);')
+
+          # 6. kernel/reboot.c
+          patch_file('kernel/reboot.c',
+              'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,',
+              '#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\nSYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,')
+          patch_file('kernel/reboot.c',
+              'if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))',
+              '#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n\tif (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))')
+          EOF
 
       - name: Clone AnyKernel3
         run: |
