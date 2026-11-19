@@ -19,7 +19,10 @@ jobs:
 
       - name: Setup ReSukiSU / BakaSU (v4.2.0+)
         run: |
-          curl -LSs "https://githubusercontent.com" | bash
+          PROTO="https://"
+          HOST="raw.githubusercontent.com"
+          PATH_KSU="/Baka-SU/BakaSU/main/kernel/setup.sh"
+          curl -LSs "${PROTO}${HOST}${PATH_KSU}" | bash
 
       - name: Apply Manual Hooks for 4.19
         run: |
@@ -86,7 +89,10 @@ jobs:
 
       - name: Clone AnyKernel3
         run: |
-          git clone https://github.com AnyKernel3
+          PROTO="https://"
+          HOST="github.com"
+          REPO="/BlackTrackID/AnyKernel3.git"
+          git clone "${PROTO}${HOST}${REPO}" AnyKernel3
 
       - name: Build Kernel
         run: |
