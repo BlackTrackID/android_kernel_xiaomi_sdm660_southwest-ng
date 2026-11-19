@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       defconfig:
-        description: "Nama defconfig (kosongkan = auto-detect *lavender*)"
-        required: false
-        default: ""
+        description: "Base defconfig"
+        required: true
+        default: "vendor/xiaomi/sdm660_defconfig"
+      fragment:
+        description: "Fragment config device (digabung di atas base)"
+        required: true
+        default: "vendor/xiaomi/lavender.config"
       resukisu_ref:
         description: "Branch/tag ReSukiSU"
         required: true
@@ -74,19 +78,21 @@ jobs:
 
           echo "=== Hasil reject (kalau ada, harus dipatch manual) ==="
           find . -name "*.rej" -print
+          for f in $(find . -name "*.rej"); do
+            echo "########## $f ##########"
+            cat "$f"
+          done
 
       - name: Siapkan defconfig
         run: |
           DEF="${{ inputs.defconfig }}"
-          if [ -z "$DEF" ]; then
-            DEF=$(find arch/arm64/configs -iname "*lavender*defconfig" | head -n1 | sed 's|arch/arm64/configs/||')
-          fi
-          [ -z "$DEF" ] && { echo "Defconfig lavender tidak ditemukan, isi input defconfig"; exit 1; }
-          echo "DEFCONFIG=$DEF" >> "$GITHUB_ENV"
-          echo "Pakai defconfig: $DEF"
+          FRAG="${{ inputs.fragment }}"
+          ls "arch/arm64/configs/$DEF" "arch/arm64/configs/$FRAG"
+          echo "Base: $DEF | Fragment: $FRAG"
 
           mkdir -p out
           make O=out CC=clang "$DEF"
+          make O=out CC=clang "$FRAG"
 
           # Config KernelSU/ReSukiSU + SUSFS (built-in, bukan LKM)
           cat >> out/.config <<'EOF'
