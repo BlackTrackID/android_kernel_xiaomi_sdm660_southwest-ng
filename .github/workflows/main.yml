@@ -91,6 +91,116 @@ jobs:
             cat "$f"
           done
 
+      - name: Pasang manual hook ReSukiSU/BakaSU (4.19 non-GKI)
+        run: |
+          python3 - <<'PY'
+          import re, sys
+
+          def read(p):
+              return open(p, encoding="utf-8", errors="surrogateescape").read()
+
+          def write(p, s):
+              open(p, "w", encoding="utf-8", errors="surrogateescape").write(s)
+
+          def add_decl(s, decl):
+              # sisipkan deklarasi setelah #include terakhir di bagian atas file
+              ms = [m for m in re.finditer(r"^#include .*$", s, re.M) if s.count("\n", 0, m.start()) < 120]
+              pos = ms[-1].end()
+              return s[:pos] + "\n\n#ifdef CONFIG_KSU_MANUAL_HOOK\n" + decl + "#endif\n" + s[pos:]
+
+          def hook(code):
+              return "#ifdef CONFIG_KSU_MANUAL_HOOK\n" + code + "#endif\n"
+
+          def fail(msg):
+              print("GAGAL:", msg)
+              sys.exit(1)
+
+          # ---------- fs/stat.c ----------
+          p = "fs/stat.c"
+          s = read(p)
+          if "ksu_handle_" not in s:
+              old = "error = vfs_fstatat(dfd, filename, &stat, flag);"
+              n = s.count(old)
+              if n < 1:
+                  fail("stat.c: vfs_fstatat tidak ditemukan")
+              s = re.sub(r"^[ \t]*" + re.escape(old),
+                         lambda m: hook("\tksu_handle_stat(&dfd, &filename, &flag);\n") + "\t" + old,
+                         s, flags=re.M)
+              i = s.find("SYSCALL_DEFINE2(newfstat,")
+              if i < 0:
+                  fail("stat.c: SYSCALL newfstat tidak ditemukan")
+              j = s.find("\treturn error;", i)
+              s = s[:j] + hook("\tksu_handle_newfstat_ret(&fd, &statbuf);\n") + s[j:]
+              s = add_decl(s,
+                  "extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n"
+                  "extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n")
+              write(p, s)
+              print(p, "OK, hook vfs_fstatat x", n)
+
+          # ---------- fs/exec.c ----------
+          p = "fs/exec.c"
+          s = read(p)
+          if "ksu_handle_" not in s:
+              old = "return __do_execve_file(fd, filename, argv, envp, flags, NULL);"
+              if s.count(old) != 1:
+                  fail("exec.c: pola do_execveat_common tidak cocok (ditemukan %d)" % s.count(old))
+              new = ("#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                     "\t{\n"
+                     "\t\tint retval;\n"
+                     "\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
+                     "\t\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n"
+                     "\t\tksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);\n"
+                     "\t\treturn retval;\n"
+                     "\t}\n"
+                     "#else\n"
+                     "\t" + old + "\n"
+                     "#endif")
+              s = re.sub(r"^[ \t]*" + re.escape(old), lambda m: new, s, flags=re.M)
+              s = add_decl(s,
+                  "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n"
+                  "extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n")
+              write(p, s)
+              print(p, "OK")
+
+          # ---------- fs/open.c ----------
+          p = "fs/open.c"
+          s = read(p)
+          if "ksu_handle_" not in s:
+              hk = hook("\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n")
+              old = "return do_faccessat(dfd, filename, mode);"
+              if s.count(old) == 1:
+                  s = re.sub(r"^[ \t]*" + re.escape(old), lambda m: hk + "\t" + old, s, flags=re.M)
+              else:
+                  i = s.find("SYSCALL_DEFINE3(faccessat")
+                  if i < 0:
+                      fail("open.c: SYSCALL faccessat tidak ditemukan")
+                  j = s.find("\tif (mode & ~S_IRWXO)", i)
+                  if j < 0:
+                      fail("open.c: pola faccessat (4.19-) tidak cocok")
+                  s = s[:j] + hk + "\n" + s[j:]
+              s = add_decl(s, "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n")
+              write(p, s)
+              print(p, "OK")
+
+          # ---------- kernel/reboot.c ----------
+          import os
+          p = "kernel/reboot.c" if os.path.exists("kernel/reboot.c") else "kernel/sys.c"
+          s = read(p)
+          if "ksu_handle_sys_reboot" not in s:
+              i = s.find("SYSCALL_DEFINE4(reboot")
+              if i < 0:
+                  fail(p + ": SYSCALL reboot tidak ditemukan")
+              m = re.compile(r"\n[ \t]*int ret = 0;\n").search(s, i)
+              if not m:
+                  fail(p + ": 'int ret = 0;' tidak ditemukan di reboot")
+              s = s[:m.end()] + hook("\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n") + s[m.end():]
+              s = add_decl(s, "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n")
+              write(p, s)
+              print(p, "OK")
+          PY
+
+          git --no-pager diff --stat -- fs/stat.c fs/exec.c fs/open.c kernel/reboot.c kernel/sys.c || true
+
       - name: Siapkan defconfig
         run: |
           DEF="${{ inputs.defconfig }}"
@@ -105,12 +215,10 @@ jobs:
           # Config KernelSU/ReSukiSU + SUSFS (built-in, bukan LKM)
           cat >> out/.config <<'EOF'
           CONFIG_KSU=y
+          CONFIG_KSU_MANUAL_HOOK=y
           CONFIG_DEBUG_KERNEL=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
-          CONFIG_KPROBES=y
-          CONFIG_HAVE_KPROBES=y
-          CONFIG_KPROBE_EVENTS=y
           CONFIG_OVERLAY_FS=y
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
@@ -130,7 +238,7 @@ jobs:
           make $MK olddefconfig
 
           echo "=== Cek config akhir ==="
-          grep -E "^CONFIG_(DEBUG_KERNEL|KALLSYMS|KALLSYMS_ALL|KSU|KPROBES)=" out/.config
+          grep -E "^CONFIG_(DEBUG_KERNEL|KALLSYMS|KALLSYMS_ALL|KSU|KSU_MANUAL_HOOK)=" out/.config
           grep -q "^CONFIG_KALLSYMS_ALL=y" out/.config \
             || { echo "KALLSYMS_ALL ter-reset oleh olddefconfig (cek dependensi)"; exit 1; }
 
