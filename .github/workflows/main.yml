@@ -31,6 +31,10 @@ env:
   KBUILD_BUILD_HOST: github-actions
   DEVICE: lavender
   ROM_TAG: crDroid-7.64-A11
+  MK: >-
+    O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
+    OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+    CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
 jobs:
   build:
@@ -51,10 +55,14 @@ jobs:
             python3 git curl patch lz4 xz-utils libncurses-dev \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      - name: Setup toolchain (Proton Clang)
+      - name: Setup toolchain (LLVM/Clang 18)
         run: |
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git "$HOME/clang"
-          echo "$HOME/clang/bin" >> "$GITHUB_PATH"
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y clang-18 lld-18 llvm-18
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+          /usr/lib/llvm-18/bin/clang --version
 
       - name: Integrasi ReSukiSU
         run: |
@@ -91,8 +99,8 @@ jobs:
           echo "Base: $DEF | Fragment: $FRAG"
 
           mkdir -p out
-          make O=out CC=clang "$DEF"
-          make O=out CC=clang "$FRAG"
+          make $MK "$DEF"
+          make $MK "$FRAG"
 
           # Config KernelSU/ReSukiSU + SUSFS (built-in, bukan LKM)
           cat >> out/.config <<'EOF'
@@ -116,19 +124,20 @@ jobs:
           if [ "${{ inputs.use_susfs }}" != "true" ]; then
             sed -i '/CONFIG_KSU_SUSFS/d' out/.config
           fi
-          make O=out CC=clang olddefconfig
+          make $MK olddefconfig
 
       - name: Build kernel
         run: |
-          export PATH="$HOME/clang/bin:$PATH"
-          make -j"$(nproc)" O=out \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump STRIP=llvm-strip \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            2>&1 | tee build.log
+          MAKE_ARGS="$MK"
+
+          set -o pipefail
+          if ! make -j"$(nproc)" $MAKE_ARGS 2>&1 | tee build.log; then
+            echo "=============== ERROR ASLI ==============="
+            grep -nE "error:|Error [0-9]|undefined reference|No rule" build.log | head -n 40
+            echo "=============== ULANG -j1 ==============="
+            make -j1 $MAKE_ARGS 2>&1 | tail -n 60
+            exit 1
+          fi
 
           ls -la out/arch/arm64/boot/
 
