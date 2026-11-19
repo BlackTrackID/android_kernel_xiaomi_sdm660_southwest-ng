@@ -57,10 +57,18 @@ jobs:
 
       - name: Setup toolchain (LLVM/Clang 18)
         run: |
-          wget -q https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt-get install -y clang-18 lld-18 llvm-18
+          # Tanpa llvm.sh: skrip itu ikut memasang lldb & clangd yang menarik
+          # libgrpc/protobuf/abseil dari mirror Ubuntu (itu yang gagal diunduh).
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb https://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm18.list
+          for i in 1 2 3; do
+            sudo apt-get -o Acquire::Retries=5 update && \
+            sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+              clang-18 lld-18 llvm-18 && break
+            echo "apt gagal (percobaan $i), ulangi..."; sleep 15
+          done
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
           /usr/lib/llvm-18/bin/clang --version
 
