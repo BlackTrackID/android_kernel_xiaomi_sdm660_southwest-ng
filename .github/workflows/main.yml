@@ -105,6 +105,7 @@ jobs:
           # Config KernelSU/ReSukiSU + SUSFS (built-in, bukan LKM)
           cat >> out/.config <<'EOF'
           CONFIG_KSU=y
+          CONFIG_DEBUG_KERNEL=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
           CONFIG_KPROBES=y
@@ -127,6 +128,11 @@ jobs:
             sed -i '/CONFIG_KSU_SUSFS/d' out/.config
           fi
           make $MK olddefconfig
+
+          echo "=== Cek config akhir ==="
+          grep -E "^CONFIG_(DEBUG_KERNEL|KALLSYMS|KALLSYMS_ALL|KSU|KPROBES)=" out/.config
+          grep -q "^CONFIG_KALLSYMS_ALL=y" out/.config \
+            || { echo "KALLSYMS_ALL ter-reset oleh olddefconfig (cek dependensi)"; exit 1; }
 
       - name: Build kernel
         run: |
