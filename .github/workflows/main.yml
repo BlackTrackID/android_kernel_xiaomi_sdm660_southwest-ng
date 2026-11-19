@@ -19,25 +19,34 @@ jobs:
 
       - name: Setup ReSukiSU / BakaSU
         run: |
-          curl -LSs "https://githubusercontent.com" | bash
+          PROTO="https://"
+          HOST="raw.githubusercontent.com"
+          PATH_KSU="/Baka-SU/BakaSU/main/kernel/setup.sh"
+          curl -LSs "${PROTO}${HOST}${PATH_KSU}" | bash
 
       - name: Setup & Patch SUSFS (4.19)
         run: |
-          git clone --depth=1 -b kernel-4.19 https://gitlab.com susfs4ksu
+          PROTO="https://"
+          HOST="gitlab.com"
+          REPO="/simonpunk/susfs4ksu.git"
+          git clone --depth=1 -b kernel-4.19 "${PROTO}${HOST}${REPO}" susfs4ksu
           
           # Salin file inti SUSFS ke source kernel
           cp susfs4ksu/kernel_patches/fs/* fs/
           cp susfs4ksu/kernel_patches/include/linux/* include/linux/
           
-          # Terapkan patch SUSFS ke kernel 4.19 (menggunakan --forward -N agar toleran terhadap minor hunk)
+          # Terapkan patch SUSFS ke kernel 4.19
           patch -p1 --forward -N < susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch || true
           
-          # Bersihkan folder sementara susfs4ksu agar tidak mengganggu build
+          # Bersihkan folder sementara susfs4ksu
           rm -rf susfs4ksu
 
       - name: Clone AnyKernel3
         run: |
-          git clone --depth=1 https://github.com AnyKernel3
+          PROTO="https://"
+          HOST="github.com"
+          REPO="/BlackTrackID/AnyKernel3.git"
+          git clone --depth=1 "${PROTO}${HOST}${REPO}" AnyKernel3
 
       - name: Create Swap Space
         run: |
