@@ -94,6 +94,14 @@ jobs:
           REPO="/BlackTrackID/AnyKernel3.git"
           git clone "${PROTO}${HOST}${REPO}" AnyKernel3
 
+      - name: Create Swap Space
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
       - name: Build Kernel
         run: |
           export ARCH=arm64
