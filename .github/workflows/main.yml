@@ -38,6 +38,9 @@ jobs:
           # Terapkan patch SUSFS ke kernel 4.19
           patch -p1 --forward -N < susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch || true
           
+          # Cetak isi file reject (.rej) ke log jika ada hunk yang gagal
+          find . -name "*.rej" -exec echo "=== REJECT FILE: {} ===" \; -exec cat {} \;
+          
           # Bersihkan folder sementara susfs4ksu
           rm -rf susfs4ksu
 
@@ -61,8 +64,8 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
           
-          # 1. Generate .config awal untuk Redmi Note 7 (Non-Dynamic)
-          make O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip vendor/sdm660-perf_defconfig vendor/xiaomi/lavender.config
+          # 1. Generate .config awal sambil menekan Enter otomatis untuk prompt fragment
+          yes "" | make O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip vendor/sdm660-perf_defconfig vendor/xiaomi/lavender.config
           
           # 2. Aktifkan ReSukiSU dan modul-modul SUSFS
           ./scripts/config --file out/.config \
@@ -83,11 +86,11 @@ jobs:
             -d CONFIG_KSU_MANUAL_HOOK \
             -d CONFIG_KSU_TRACEPOINT_HOOK
           
-          # 3. Kunci semua opsi baru secara otomatis (mencegah infinite loop / hang)
-          make O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip olddefconfig
+          # 3. Kunci semua opsi baru sambil menjawab Enter otomatis
+          yes "" | make O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip olddefconfig
           
           # 4. Compile Kernel
-          make -j$(nproc) O=out \
+          yes "" | make -j$(nproc) O=out \
             CC=clang \
             LD=ld.lld \
             AR=llvm-ar \
