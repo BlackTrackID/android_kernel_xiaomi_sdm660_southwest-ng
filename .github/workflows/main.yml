@@ -105,6 +105,8 @@ jobs:
           # Config KernelSU/ReSukiSU + SUSFS (built-in, bukan LKM)
           cat >> out/.config <<'EOF'
           CONFIG_KSU=y
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
