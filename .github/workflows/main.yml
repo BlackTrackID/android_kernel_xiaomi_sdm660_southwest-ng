@@ -72,6 +72,9 @@ jobs:
           if [ "$V" = "14" ]; then
             # clang-14 ada langsung di repo Ubuntu 22.04
             sudo apt-get install -y --no-install-recommends clang-14 lld-14 llvm-14
+            # Source ini memakai flag warning milik clang baru (mis. -Wno-cast-function-type-strict,
+            # clang 16+). Di clang 14 itu error karena -Werror; abaikan opsi yang tidak dikenal.
+            echo "MK=$MK KCFLAGS=-Wno-unknown-warning-option" >> "$GITHUB_ENV"
           else
             wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
               | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
