@@ -1,4 +1,4 @@
-name: Build Kernel lavender (4.19 + ReSukiSU + SUSFS)
+name: Build Kernel lavender (4.19 + ReSukiSU) v2
 
 on:
   workflow_dispatch:
@@ -20,9 +20,20 @@ on:
         required: true
         default: "kernel-4.19"
       use_susfs:
-        description: "Aktifkan SUSFS"
+        description: "Aktifkan SUSFS (tes pertama: matikan dulu)"
+        type: boolean
+        default: false
+      safe_mode:
+        description: "Mode aman: matikan LTO/CFI/SCS dan panic-on-oops (untuk cari penyebab bootloop)"
         type: boolean
         default: true
+      clang_version:
+        description: "Versi clang (stock ROM dibuild dengan 14)"
+        type: choice
+        options:
+          - "18"
+          - "14"
+        default: "18"
 
 env:
   ARCH: arm64
@@ -55,22 +66,26 @@ jobs:
             python3 git curl patch lz4 xz-utils libncurses-dev \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      - name: Setup toolchain (LLVM/Clang 18)
+      - name: Setup toolchain (LLVM/Clang)
         run: |
-          # Tanpa llvm.sh: skrip itu ikut memasang lldb & clangd yang menarik
-          # libgrpc/protobuf/abseil dari mirror Ubuntu (itu yang gagal diunduh).
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
-          echo "deb https://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm18.list
-          for i in 1 2 3; do
-            sudo apt-get -o Acquire::Retries=5 update && \
-            sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
-              clang-18 lld-18 llvm-18 && break
-            echo "apt gagal (percobaan $i), ulangi..."; sleep 15
-          done
-          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
-          /usr/lib/llvm-18/bin/clang --version
+          V="${{ inputs.clang_version }}"
+          if [ "$V" = "14" ]; then
+            # clang-14 ada langsung di repo Ubuntu 22.04
+            sudo apt-get install -y --no-install-recommends clang-14 lld-14 llvm-14
+          else
+            wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+              | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+            echo "deb https://apt.llvm.org/jammy/ llvm-toolchain-jammy-$V main" \
+              | sudo tee /etc/apt/sources.list.d/llvm.list
+            for i in 1 2 3; do
+              sudo apt-get -o Acquire::Retries=5 update && \
+              sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+                clang-$V lld-$V llvm-$V && break
+              echo "apt gagal (percobaan $i), ulangi..."; sleep 15
+            done
+          fi
+          echo "/usr/lib/llvm-$V/bin" >> "$GITHUB_PATH"
+          /usr/lib/llvm-$V/bin/clang --version
 
       - name: Integrasi ReSukiSU
         run: |
@@ -85,19 +100,22 @@ jobs:
             https://gitlab.com/simonpunk/susfs4ksu.git "$HOME/susfs"
           ls "$HOME/susfs/kernel_patches" || true
 
-          cp -v "$HOME/susfs/kernel_patches/fs/"*.c fs/ 2>/dev/null || true
-          cp -v "$HOME/susfs/kernel_patches/include/linux/"*.h include/linux/ 2>/dev/null || true
+          cp -v "$HOME/susfs/kernel_patches/fs/"*.c fs/
+          cp -v "$HOME/susfs/kernel_patches/include/linux/"*.h include/linux/
 
           PATCH=$(ls "$HOME/susfs/kernel_patches/"50_add_susfs_in_kernel-4.19*.patch | head -n1)
           echo "Apply: $PATCH"
-          patch -p1 --no-backup-if-mismatch < "$PATCH" || true
+          patch -p1 --no-backup-if-mismatch < "$PATCH" || echo "patch keluar dengan error"
 
-          echo "=== Hasil reject (kalau ada, harus dipatch manual) ==="
-          find . -name "*.rej" -print
-          for f in $(find . -name "*.rej"); do
-            echo "########## $f ##########"
-            cat "$f"
-          done
+          REJ=$(find . -name "*.rej")
+          if [ -n "$REJ" ]; then
+            echo "=== Ada hunk yang ditolak, harus dipatch manual ==="
+            for f in $REJ; do
+              echo "########## $f ##########"
+              cat "$f"
+            done
+            exit 1
+          fi
 
       - name: Pasang manual hook ReSukiSU/BakaSU (4.19 non-GKI)
         run: |
@@ -229,46 +247,64 @@ jobs:
           make $MK "$DEF"
           make $MK "$FRAG"
 
-          # Config KernelSU/ReSukiSU + SUSFS (built-in, bukan LKM)
-          cat >> out/.config <<'EOF'
-          CONFIG_KSU=y
-          CONFIG_KSU_MANUAL_HOOK=y
-          CONFIG_DEBUG_KERNEL=y
-          CONFIG_KALLSYMS=y
-          CONFIG_KALLSYMS_ALL=y
-          CONFIG_OVERLAY_FS=y
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_SUS_MAP=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          EOF
-          sed -i 's/^[[:space:]]*//' out/.config
+          CFG="scripts/config --file out/.config"
 
-          if [ "${{ inputs.use_susfs }}" != "true" ]; then
-            sed -i '/CONFIG_KSU_SUSFS/d' out/.config
+          # KernelSU/ReSukiSU (built-in, bukan LKM)
+          $CFG -e DEBUG_KERNEL -e KALLSYMS -e KALLSYMS_ALL -e OVERLAY_FS \
+               -e KSU -e KSU_MANUAL_HOOK
+
+          if [ "${{ inputs.use_susfs }}" = "true" ]; then
+            $CFG -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
+                 -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_MAP -e KSU_SUSFS_TRY_UMOUNT \
+                 -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_OPEN_REDIRECT -e KSU_SUSFS_ENABLE_LOG
           fi
+
+          # Mode aman: singkirkan penyebab bootloop yang paling mungkin
+          if [ "${{ inputs.safe_mode }}" = "true" ]; then
+            $CFG -d LTO_CLANG -d CFI_CLANG -d CFI_CLANG_SHADOW -d SHADOW_CALL_STACK \
+                 -d PANIC_ON_OOPS -d MODULE_SIG_FORCE \
+                 -d SLUB_DEBUG_PANIC_ON -d DEBUG_PANIC_ON_OOM \
+                 -d PANIC_ON_SCHED_BUG -d PANIC_ON_RT_THROTTLING \
+                 -d PANIC_ON_DATA_CORRUPTION -d BUG_ON_DATA_CORRUPTION \
+                 --set-val PANIC_TIMEOUT 5
+          fi
+
           make $MK olddefconfig
 
-          echo "=== Cek config akhir ==="
-          grep -E "^CONFIG_(DEBUG_KERNEL|KALLSYMS|KALLSYMS_ALL|KSU|KSU_MANUAL_HOOK)=" out/.config
+          echo "=== Config efektif ==="
+          grep -E "^(# )?CONFIG_(MODULES|MODULE_SIG_FORCE|LTO_CLANG|CFI_CLANG|SHADOW_CALL_STACK|PANIC_ON_OOPS|PANIC_TIMEOUT|DEBUG_PAGEALLOC|SLUB_DEBUG_ON|DEBUG_INFO|CMDLINE|QCA_CLD_WLAN|BUILD_ARM64_DT_OVERLAY|DM_ANDROID_VERITY|KSU|KSU_MANUAL_HOOK|KSU_SUSFS|KALLSYMS_ALL|LOCALVERSION)[ =]" out/.config | tee config-summary.txt
+          cp out/.config dot-config.txt
+
+          {
+            echo '### Config efektif'
+            echo '```'
+            cat config-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
           grep -q "^CONFIG_KALLSYMS_ALL=y" out/.config \
             || { echo "KALLSYMS_ALL ter-reset oleh olddefconfig (cek dependensi)"; exit 1; }
 
+          if [ "${{ inputs.safe_mode }}" = "true" ]; then
+            if grep -E "^CONFIG_(LTO_CLANG|CFI_CLANG|SHADOW_CALL_STACK)=y" out/.config; then
+              echo "Masih aktif walau sudah dimatikan; kemungkinan di-select simbol lain. Kandidatnya:"
+              grep -rnE "select (LTO_CLANG|CFI_CLANG|SHADOW_CALL_STACK)" --include='Kconfig*' . | head -n 20
+              exit 1
+            fi
+            if grep -q "^CONFIG_PANIC_ON_OOPS=y" out/.config; then
+              echo "PERINGATAN: PANIC_ON_OOPS masih y. Kandidat yang meng-select:"
+              grep -rn "select PANIC_ON_OOPS" --include='Kconfig*' . | head -n 20
+            fi
+          fi
+
       - name: Build kernel
         run: |
-          MAKE_ARGS="$MK"
-
           set -o pipefail
-          if ! make -j"$(nproc)" $MAKE_ARGS 2>&1 | tee build.log; then
+          if ! make -j"$(nproc)" $MK 2>&1 | tee build.log; then
             echo "=============== ERROR ASLI ==============="
             grep -nE "error:|Error [0-9]|undefined reference|No rule" build.log | head -n 40
             echo "=============== ULANG -j1 ==============="
-            make -j1 $MAKE_ARGS 2>&1 | tail -n 60
+            make -j1 $MK 2>&1 | tail -n 60
             exit 1
           fi
 
@@ -284,16 +320,21 @@ jobs:
             cp "$BOOT/Image.gz-dtb" AK3/
           elif [ -f "$BOOT/Image.gz" ]; then
             cp "$BOOT/Image.gz" AK3/
-            # dtb ikut di-append jika ada
             find "$BOOT/dts" -name "*.dtb" -exec cat {} + > AK3/dtb 2>/dev/null || true
           else
             echo "Image tidak ditemukan"; exit 1
           fi
 
-          cat > AK3/anykernel.sh <<'EOF'
+          TAG="ReSukiSU"
+          [ "${{ inputs.use_susfs }}" = "true" ] && TAG="ReSukiSU-SUSFS"
+          MODE=""
+          [ "${{ inputs.safe_mode }}" = "true" ] && MODE="-safe"
+          KSTR="BlackTrackID 4.19 | ${TAG}${MODE}"
+
+          cat > AK3/anykernel.sh <<EOF
           #!/system/bin/sh
           properties() { '
-          kernel.string=BlackTrackID 4.19 | ReSukiSU + SUSFS
+          kernel.string=${KSTR}
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -315,13 +356,12 @@ jobs:
           dump_boot;
           write_boot;
           EOF
-          sed -i 's/^          //' AK3/anykernel.sh
 
           DATE=$(date +%Y%m%d-%H%M)
           cd AK3
-          zip -r9 "../${DEVICE}-4.19-ReSukiSU-SUSFS-${ROM_TAG}-${DATE}.zip" . -x "*.git*"
+          zip -r9 "../${DEVICE}-4.19-${TAG}${MODE}-clang${{ inputs.clang_version }}-${ROM_TAG}-${DATE}.zip" . -x "*.git*"
           cd ..
-          echo "ZIP_NAME=${DEVICE}-4.19-ReSukiSU-SUSFS-${ROM_TAG}-${DATE}" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=${DEVICE}-4.19-${TAG}${MODE}-clang${{ inputs.clang_version }}-${ROM_TAG}-${DATE}" >> "$GITHUB_ENV"
 
       - name: Upload zip
         uses: actions/upload-artifact@v4
@@ -329,10 +369,13 @@ jobs:
           name: ${{ env.ZIP_NAME }}
           path: "*.zip"
 
-      - name: Upload build log
+      - name: Upload build log dan config
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: build.log
+          name: build-log-dan-config
+          path: |
+            build.log
+            dot-config.txt
+            config-summary.txt
           if-no-files-found: ignore
